@@ -1,0 +1,88 @@
+import torch.nn as nn
+from MultiHeadAttention import Trans2QKV,MultiHeadAttention
+from AddandNormalize import AddandNormalize
+from FeedForward import FeedForward
+
+class EncoderLayer(nn.Module):
+    def __init__(self,n_heads,d_model,batch_sentence_len,d_k,d_q,d_v,device='cpu'):
+        super(EncoderLayer, self).__init__()
+        self.Trans2KQV = Trans2QKV(n_heads=n_heads).to(device)
+        self.enc_MultiHeadAttention = MultiHeadAttention(d_model=d_model,
+                         n_heads=n_heads, d_k=d_k,
+                         d_q=d_q, d_v=d_v,device=device).to(device)
+        self.enc_AddandNormalize = AddandNormalize(batch_sentence_len).to(device)
+        self.enc_FFN = FeedForward(d_model=d_model).to(device)
+
+    def forward(self,input_X):
+        #input_X: [batch_size,sentence_len,d_model]
+        #AN_result_2: [batch_size,sentence_len,d_model]
+        #input_X是上一层的输出，若是第一个编码层，则是位置嵌入的结果
+        K = Q = V = self.Trans2KQV(input_X)
+        MHA_result = self.enc_MultiHeadAttention(Q,K,V,mode='encoder')
+        AN_result_1 = self.enc_AddandNormalize(MHA_result,input_X)
+
+        FFN_result = self.enc_FFN(AN_result_1)
+        AN_result_2 = self.enc_AddandNormalize(FFN_result,AN_result_1)
+        return AN_result_2
+
+class DecoderLayer(nn.Module):
+    def __init__(self,n_heads,d_model,batch_sentence_len,d_k,d_q,d_v,device='cpu'):
+        super(DecoderLayer, self).__init__()
+        self.Trans2KQV = Trans2QKV(n_heads=n_heads).to(device)
+        self.dec_MultiHeadAttention = MultiHeadAttention(d_model=d_model,
+                         n_heads=n_heads, d_k=d_k,
+                         d_q=d_q, d_v=d_v,device=device).to(device)
+        self.dec_AddandNormalize = AddandNormalize(batch_sentence_len).to(device)
+        self.dec_FFN = FeedForward(d_model=d_model).to(device)
+
+    def forward(self,input_X,input_encoder):
+        # input_X: [batch_size,sentence_len,d_model]
+        #AN_result_3: [batch_size,sentence_len,d_model]
+        # input_X是上一层的输出，若是第一个解码，则是位置嵌入的结果
+        #input_encoder是编码层的编码结果
+        #下面的第一块代码是没有encoder结果参与的Multi-Head Attention
+        first_K = first_Q = first_V = self.Trans2KQV(input_X)
+        MHA_result_1 = self.dec_MultiHeadAttention(first_Q, first_K, first_V,mode='decoder')
+        AN_result_1 = self.dec_AddandNormalize(MHA_result_1,input_X)
+        #下面的第二块代码是有encoder结果参与的Multi-Head Attention
+        enc_Q,enc_K,enc_V = input_encoder,input_encoder,AN_result_1
+        MHA_result_2 = self.dec_MultiHeadAttention(enc_Q,enc_K,enc_V, mode='decoder')
+        AN_result_2 = self.dec_AddandNormalize(MHA_result_2, AN_result_1)
+        ##下面的第三块代码是FFN
+        FFN_result = self.dec_FFN(AN_result_2)
+        AN_result_3 = self.dec_AddandNormalize(FFN_result,AN_result_2)
+        return AN_result_3
+
+class Encoder(nn.Module):
+    def __init__(self, encoder_layer_num,d_model, n_heads, batch_sentence_len,
+                 d_k, d_q, d_v,device='cpu'):
+        super(Encoder, self).__init__()
+        self.encoder_layer_num = encoder_layer_num
+        encoderLayer = EncoderLayer(d_model=d_model, n_heads=n_heads,
+                                        batch_sentence_len=batch_sentence_len,
+                                        d_k=d_k, d_q=d_q, d_v=d_v,device=device)
+        #堆叠encoder层
+        self.enc_layers = nn.ModuleList([encoderLayer
+                                     for _ in range(encoder_layer_num)])
+    def forward(self,PositionEmbeddingResult):
+        #Transformer的编码器采用栈式模式
+        EL_result = PositionEmbeddingResult
+        for enc_layer in self.enc_layers:
+            EL_result = enc_layer(EL_result)
+        return EL_result
+
+class Decoder(nn.Module):
+    def __init__(self, decoder_layer_num,d_model, n_heads, batch_sentence_len,
+                 d_k, d_q, d_v,device='cpu'):
+        super(Decoder, self).__init__()
+        decoderLayer = DecoderLayer(d_model=d_model, n_heads=n_heads,
+                                        batch_sentence_len=batch_sentence_len,
+                                        d_k=d_k, d_q=d_q, d_v=d_v,device=device)
+        self.dec_layers = nn.ModuleList([decoderLayer
+                                     for _ in range(decoder_layer_num)])
+    def forward(self,PositionEmbeddingResult,EncoderResult):
+        #Transformer的解码器采用栈式模式
+        DL_result = PositionEmbeddingResult
+        for dec_layer in self.dec_layers:
+            DL_result = dec_layer(DL_result,EncoderResult)
+        return DL_result
