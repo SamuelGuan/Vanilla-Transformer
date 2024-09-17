@@ -1,0 +1,20 @@
+class PositionalEncoding(nn.Module):
+					def __init__(self, d_model, sentence_len):
+						#d_model是词向量维度,max_len是句子最大长度，dropout是神经元失效比率，或者叫置0率
+						super(PositionalEncoding, self).__init__()
+						pe = torch.zeros(sentence_len, d_model)
+						sin_position = torch.arange(0, sentence_len, 2).unsqueeze(1)
+						cos_position = torch.arange(1, sentence_len, 2).unsqueeze(1)
+						div_term = torch.exp(
+							torch.arange(0, d_model) * -(math.log(10000.0) / d_model)
+							)
+						pe[0::2, :] = torch.sin(sin_position * div_term)
+						pe[1::2, :] = torch.cos(cos_position * div_term)
+						self.pe = pe
+						print(pe.shape)
+				
+					def forward(self, x):
+						#位置编码是直接加和，而不是拼接
+						#requires_grad_(False)这一步不需要梯度运算加速计算
+						x = x + self.pe[:x.size(0), : x.size(1)].requires_grad_(False)
+						return x
