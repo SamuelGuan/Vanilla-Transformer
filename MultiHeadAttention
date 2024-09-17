@@ -1,0 +1,77 @@
+import torch.nn as nn
+
+class Trans2QKV(nn.Module):
+    #将输入矩阵分割为头数为n_heads的QKV矩阵
+    def __init__(self,n_heads):
+        super(Trans2QKV, self).__init__()
+        self.n_heads = n_heads
+    def forward(self,X):
+        #print(X.shape)
+        batch_size = 1
+        KQV = X.reshape(batch_size, self.n_heads, -1, X.shape[-1])
+        return KQV
+
+class ScaleDotProductAttention(nn.Module):
+    def __init__(self,device='cpu'):
+        super(ScaleDotProductAttention,self).__init__()
+        self.device = device
+    def forward(self, K, Q, V, mode='encoder'):
+        '''
+        Q: [batch_size, n_heads, len_q, d_q]
+        K: [batch_size, n_heads, len_k, d_k]
+        V: [batch_size, n_heads, len_v(=len_k), d_v]
+        attn_mask: [batch_size, n_heads, seq_len, seq_len]
+        '''
+        d_k = K.shape[-1]
+        #由于K的形状为[batch_size, n_heads, len_k, d_k],
+        #而transpose(-1,-2)即交换最后两个维度，就是转置的实现
+        QK = torch.matmul(Q, K.transpose(-1, -2))/math.sqrt(d_k)
+        if mode == 'decoder':
+            #解码器才需要被mask掉QK
+            #有些代码喜欢把mask矩阵独立出来生成避免掉重复生成的时间浪费
+            #不过为了易于初学者理解，不对代码进行优化，只为易于学习
+            masked_shape = [QK.size(-3), QK.size(-2), QK.size(-1)]
+            mask = np.triu(np.zeros(masked_shape), k=1)
+            #mask.byte()和mask.bool()是为了能够正常运行,
+            #十分奇怪的bug，如果不加bool()在win平台不能运行，但在linus平台可以
+            mask = torch.from_numpy(mask).byte()
+            QK.masked_fill_(mask.to(self.device).bool(), -1e9)
+        attn = nn.Softmax(dim=-1)(QK)
+        context = torch.matmul(attn, V)
+        return context
+
+class MultiHeadAttention(nn.Module):
+    #这个模块在encoder和decoder都有
+    #所以在编写时候需要分清encoder的情况和decoder的情况
+    #对于encoder，它的forward很简单，只需要输入一个矩阵让这个模块自动完成linear即可
+    #对于decoder，第一层的forward和encoder一致，也是十分友好
+    #但是第二层的forward的Q,K则是来自encoder，而V则是来自第一层
+    def __init__(self,d_model,n_heads,d_k,d_q,d_v,device='cpu',bias=False):
+        super(MultiHeadAttention,self).__init__()
+        self.n_heads = n_heads
+        #把ScaleDotProductAttention的实例化传进来
+        self.SDPA = ScaleDotProductAttention(device).to(device)
+        #这个线性层设置为方阵即可
+        #d_xx就是xx.shape[-1],换句话说就是列数
+        #和常规矩阵代数不同，十分奇特的是在Transformer论文中常常使用的是XA = B而不是AX = B
+        #所以全连接层的行数和列数要和常规的情况是转置关系
+        self.W_Q = nn.Linear(d_model, d_q * n_heads, bias=bias)
+        self.W_K = nn.Linear(d_model, d_k * n_heads, bias=bias)
+        self.W_V = nn.Linear(d_model, d_v * n_heads, bias=bias)
+        #fc层的作用就是将多头压缩回单头，将书本读薄
+        self.fc = nn.Linear(n_heads * d_v, d_model, bias=bias)
+
+    def forward(self, Q, K, V,mode='encoder'):
+        batch_size,d_v = Q.shape[0],V.shape[-1]
+        #进行linear层的运算
+        W_Q = self.W_Q(Q)
+        W_K = self.W_K(K)
+        W_V = self.W_V(V)
+        #进行ScaleDotProductAttention运算
+        context = self.SDPA.forward(W_Q,W_K,W_V,mode)
+        #concat层,保持batch_size，取消掉n_head这个维度
+        #最终得到的应该是[batch_size,sentence_len,n_heads * d_v]
+        context = context.reshape(batch_size, -1, self.n_heads * d_v)
+        #最后的全连接层
+        context = self.fc(context)
+        return context
