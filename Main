@@ -4,4 +4,174 @@ import math
 import torch.nn as nn
 import torch.utils.data as data_utils
 import matplotlib.pyplot as plt
-
+from MultiHeadAttention import Trans2QKV,MultiHeadAttention
+from AddandNormalize import AddandNormalize
+from FeedForward import FeedForward
+from Transformer_Encoder_Decoder import Encoder, Decoder
+from PositionalEncoding import PositionalEncoding
+			
+			class Transformer(nn.Module):
+				def __init__(self,encoder_num,decoder_num,
+										num_heads,d_model,
+										enc_sentence_len,
+										dec_sentence_len,
+										enc_d_k, enc_d_q, enc_d_v,
+										dec_d_k, dec_d_q, dec_d_v,
+										device='cpu',mode='train'):
+					#encoder_num是解码器栈中的解码器层的个数，decoder_num同理
+					#num_heads是多头注意力中的头的个数
+					#d_model是词向量嵌入维度
+					#enc_sentence_len是编码器输入句子的长度
+					#dec_sentence_len是解码器输入句子的长度
+					#target_size是生成的文本的长度
+					#d_k,d_q,d_v是K,Q,V矩阵的词嵌入维度
+					super(Transformer, self).__init__()
+					#设定Transformer网络的输出的嵌入长度
+					target_size = dec_d_k
+					#编码器栈实例化
+					self.encoder = Encoder(encoder_layer_num =encoder_num, d_model=d_model,n_heads=num_heads,
+										batch_sentence_len=enc_sentence_len,
+										d_k=enc_d_k, d_q=enc_d_q, d_v=enc_d_v, device=device)
+					#解码器栈实例化
+					self.decoder = Decoder(decoder_layer_num=decoder_num, d_model=d_model, n_heads=num_heads,
+										batch_sentence_len=dec_sentence_len,
+										d_k=dec_d_k, d_q=dec_d_q, d_v=dec_d_v, device=device)
+					#最终输出的线性层
+					self.linear = nn.Linear(dec_d_k,target_size,bias=False).to(device)
+					
+					def forward(self,enc_input,dec_input):
+						#编码器栈的计算
+						enc_result = self.encoder(enc_input)
+						#解码器栈的计算
+						dec_result = self.decoder(dec_input,enc_result)
+			
+						softmax_result = nn.Softmax(dim=1)(dec_result)
+						linear_output = self.linear(softmax_result)
+						return linear_output
+			
+			def mixDataset(language1,language2):
+				#将中英文本相匹配
+				language1 = language1.squeeze().numpy()
+				language2 = language2.squeeze().numpy()
+				dataset = []
+				for i in range(len(language1)):
+					dataset.append([language1[i],language2[i]])
+				return torch.tensor(dataset)
+			
+			
+			if __name__ == '__main__':
+				#数据输入与词向量嵌入,不等长数据嵌入
+				Chinese_Sentence = np.random.randint(1,99,10000).reshape(-1,10)
+				English_sentences = np.random.randint(5,104,12000).reshape(-1,10)
+			
+				C_Sentence = torch.tensor(Chinese_Sentence)
+				E_Sentence = torch.tensor(English_sentences)
+				print("词嵌入矩阵为：",C_Sentence.shape)
+				print("-"*100)
+				d_model = C_Sentence.shape[-1]
+				
+				#位置嵌入与输入的设置
+				Chinese_PE = PositionalEncoding(d_model=C_Sentence.shape[-1],sentence_len=C_Sentence.shape[-2])
+				Chinese_positionEncoding = Chinese_PE.forward(C_Sentence)
+				X = Chinese_positionEncoding
+			
+				English_PE = PositionalEncoding(d_model=E_Sentence.shape[-1],sentence_len=E_Sentence.shape[-2])
+				English_positionEncoding = English_PE.forward(E_Sentence)
+				Y = English_positionEncoding
+			
+				dataset = mixDataset(X,Y)
+				batch_size = 20
+				if batch_size > len(X.numpy()):
+					raise ValueError("batch_size is larger than total number of samples","batch_size大于样本总数")
+				#将准备好的数据载入数据加载器dataloader
+				dataloader = data_utils.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True,drop_last=True)
+			
+				#超参数设定
+				learning_rate = 0.03
+				n_heads = 5
+				d_model = X.shape[-1]
+				encoder_layer_num = 6
+				decoder_layer_num = 6
+				#模拟训练的参数设置，到时候需要自动捕捉
+				print(X.shape,Y.shape)
+				enc_d_k = enc_d_q = enc_d_v = X.reshape(1, n_heads, -1, X.shape[-1]).shape[-1]
+				dec_d_k = dec_d_q = dec_d_v = Y.reshape(1, n_heads, -1, Y.shape[-1]).shape[-1]
+				enc_sentence_len = batch_size
+				dec_sentence_len = batch_size
+			
+				#超参数合法性检查
+				if batch_size > len(X.numpy()):
+					raise ValueError("batch_size大于样本总数")
+				if batch_size%n_heads != 0:
+					raise ValueError("多头数量与批次数量之比不为整数！")
+				if encoder_layer_num <=0 or decoder_layer_num <= 0:
+					raise ValueError("编码器或解码器数量小于1！")
+			
+				#准备训练
+				device = "cuda" #如果没有NVIDIA的显卡则改为cpu
+				mode = 'train'
+				target_size = 0
+				#Transformer实例化
+				transformer = Transformer(encoder_num = encoder_layer_num,
+								decoder_num = decoder_layer_num,
+								d_model=d_model,
+								num_heads= n_heads,
+								enc_sentence_len=enc_sentence_len,
+								dec_sentence_len=dec_sentence_len,
+								enc_d_k =enc_d_k, enc_d_q =enc_d_q, enc_d_v =enc_d_v,
+								dec_d_k=dec_d_k, dec_d_q=dec_d_q, dec_d_v=dec_d_v,
+								device=device).to(device)
+				#训练模式的时候因为需要目标大小和解码器输入大小对齐，所以此时target_size = dec_d_k
+				#翻译模式的时候因为无法预知到底输出多长的句子，所以target_size需要另外设置
+				#测试代码逻辑是否正确：out = transformer(X,Y)
+				#测试代码逻辑是否正确：print("out.shape",out.shape)
+			
+				#训练
+				criterion = nn.MSELoss().to(device) 
+				optimizer = torch.optim.Adam(transformer.parameters(), lr=learning_rate)
+				
+				epochs = 500 #训练轮数
+				transformer.train() #训练模式
+				loss_list = []  #存储Loss值的变化，以便观察Loss值是否收敛
+				#将训练好的模型保存在pth中
+				save_file = 'transformer_model.pth'
+				for epoch in range(epochs):
+					for element in dataloader:
+						x = element[:,0].unsqueeze(0)
+						y = element[:,1].unsqueeze(0)
+						dec_outputs = transformer(x,y)
+						loss = criterion(y,dec_outputs)
+						loss_list.append(loss.item())
+						optimizer.zero_grad()
+						loss.backward()
+						optimizer.step()
+						if epoch == epochs - 1:
+							#保存最后一轮的模型
+							torch.save(transformer,f = save_file)
+					print(f"训练轮数{epoch},Loss:{loss_list[-1]}")
+				print(loss_list)
+				plt.plot(loss_list)
+				plt.title('Loss')
+				plt.show()
+				
+				#翻译部分
+				model = torch.load('Transformer_model.pth')
+				model.eval()
+				#限制最大输入字符
+				max_input_len = enc_sentence_len
+				str = input("请输入20个字以内的语句:")
+				#增加一个条件语句强行截断超过长度的字符保证安全性
+				input_len = min(len(str), max_input_len)
+				#模拟转码
+				input_sentence = np.random.randint(1,99,size=input_len*d_model).reshape(input_len,d_model)
+				len_diff = max_input_len - min(input_len,max_input_len)
+				# 位置编码与补齐
+				PE = PositionalEncoding(d_model=input_sentence.shape[-1],sentence_len=input_sentence.shape[-2])
+				input_sentence = PE(torch.tensor(input_sentence)).numpy()
+				complement = np.asarray([0 for _ in range(len_diff*d_model)]).reshape(len_diff,d_model)
+				translated_sentence = np.concatenate((input_sentence,complement),axis=0)
+				translated_sentence = torch.tensor(translated_sentence).type(torch.FloatTensor)
+				
+				with torch.no_grad():
+					output = model(translated_sentence,translated_sentence)
+				print(output)
